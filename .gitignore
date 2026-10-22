@@ -1,0 +1,24 @@
+# npm dependencies and Angular's build cache.
+# CI reinstalls them from the lockfile, so they never belong in git.
+node_modules/
+.angular/
+
+#----------------------------build outputs---------------------------------
+#----------------------------artifact comes from CI---------------------------------
+dist/
+bin/
+obj/
+publish/
+
+#----------------------------dotnet test writes result files.-----------------------
+TestResults/
+
+# fake IIS server folder the deploy scripts will create on your Mac during simulation.
+# It is runtime state, not source.
+mock-server/
+
+#makes sure a local secrets file can never be committed.
+.env
+
+#macOS Finder noise.
+.DS_Store

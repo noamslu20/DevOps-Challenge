@@ -161,8 +161,9 @@ jobs:
       - name: Create release
         run: |
           TAG="${COMPONENT}-v${VERSION}"
-          EXISTING=$(gh api "repos/${GH_REPO}/git/ref/tags/${TAG}" --jq .object.sha 2>/dev/null || true)
-          if [ -n "$EXISTING" ]; then
+          # `if VAR=$(cmd)` tests the command's exit code: gh api exits non-zero on 404,
+          # so the branch runs only when the tag really exists (and VAR then holds its commit).
+          if EXISTING=$(gh api "repos/${GH_REPO}/git/ref/tags/${TAG}" --jq .object.sha 2>/dev/null); then
             if [ "$EXISTING" = "$GITHUB_SHA" ]; then
               echo "Release ${TAG} already exists for ${GITHUB_SHA}; nothing to do."
               exit 0

@@ -1,0 +1,126 @@
+name: CD Rollback
+
+# Manual recovery: switch an environment back to a release that is already on the server.
+# Same approval gate as a deploy, because it changes what the environment serves.
+# A release that was pruned from the server is redeployed with CD Deploy from its GitHub Release instead.
+on:
+  workflow_dispatch:
+    inputs:
+      component:
+        description: Component to roll back
+        type: choice
+        options: [frontend, backend]
+        required: true
+      environment:
+        description: Target environment
+        type: choice
+        options: [staging, production]
+        required: true
+      target_version:
+        description: Version to activate (e.g. 1.0.6). Leave empty to use the recorded previous release.
+        type: string
+        required: false
+        default: ""
+
+permissions:
+  contents: read
+
+jobs:
+  rollback:
+    name: Roll back ${{ inputs.component }} on ${{ inputs.environment }}
+    runs-on: ${{ vars.DEPLOY_RUNNER_LABEL || 'ubuntu-24.04' }}
+    environment: ${{ inputs.environment }}
+    # Same group as CD Deploy: a rollback and a deploy of the same component never overlap.
+    concurrency:
+      group: deploy-${{ inputs.component }}-${{ inputs.environment }}
+      cancel-in-progress: false
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    env:
+      DEPLOY_MODE: ${{ vars.DEPLOY_MODE || 'Mock' }}
+      COMPONENT: ${{ inputs.component }}
+      TARGET_VERSION: ${{ inputs.target_version }}
+    steps:
+      - name: Checkout deploy scripts only
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          sparse-checkout: deploy
+
+      - name: Resolve deploy root
+        env:
+          DEPLOY_ROOT_VAR: ${{ vars.DEPLOY_ROOT }}
+        run: |
+          if [ "$DEPLOY_MODE" = "Mock" ]; then ROOT="$RUNNER_TEMP/deploy-root"; else ROOT="$DEPLOY_ROOT_VAR"; fi
+          echo "DEPLOY_ROOT=$ROOT" >> "$GITHUB_ENV"
+          echo "Deploy root: $ROOT ($DEPLOY_MODE mode)"
+
+      # Same cache keys as CD Deploy, so the rollback sees the state the last deploy left behind.
+      - name: Restore mock server state (mock only)
+        if: env.DEPLOY_MODE == 'Mock'
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ runner.temp }}/deploy-root
+          key: mock-server-${{ inputs.environment }}-${{ github.run_id }}-${{ github.run_attempt }}
+          restore-keys: mock-server-${{ inputs.environment }}-
+
+      # No download, no extraction: only the switch-and-verify path, on a folder that already exists.
+      - name: Roll back
+        shell: pwsh
+        env:
+          SITE_NAME: ${{ inputs.component == 'frontend' && vars.FRONTEND_SITE_NAME || vars.API_SITE_NAME }}
+          APP_POOL: ${{ inputs.component == 'frontend' && vars.FRONTEND_APP_POOL || vars.API_APP_POOL }}
+          HEALTH_URL: ${{ inputs.component == 'frontend' && vars.FRONTEND_HEALTH_URL || vars.API_HEALTH_URL }}
+        run: |
+          $params = @{
+            Component   = $env:COMPONENT
+            DeployRoot  = $env:DEPLOY_ROOT
+            SiteName    = $env:SITE_NAME
+            AppPoolName = $env:APP_POOL
+            Mode        = $env:DEPLOY_MODE
+          }
+          if ($env:DEPLOY_MODE -eq 'Iis') { $params.HealthUrl = $env:HEALTH_URL }
+          if ($env:TARGET_VERSION)        { $params.TargetVersion = $env:TARGET_VERSION }
+          & ./deploy/Rollback-Release.ps1 @params
+
+      - name: Write job summary
+        if: always()
+        shell: pwsh
+        env:
+          TARGET_ENV: ${{ inputs.environment }}
+        run: |
+          $resultFile = "$env:DEPLOY_ROOT/$env:COMPONENT/last-rollback.json"
+          if (-not (Test-Path $resultFile)) {
+            "### Rollback of $env:COMPONENT on $env:TARGET_ENV did not reach the rollback script" | Out-File -Append $env:GITHUB_STEP_SUMMARY
+            exit 0
+          }
+          $r = Get-Content $resultFile -Raw | ConvertFrom-Json
+          $s = Get-Content "$env:DEPLOY_ROOT/$env:COMPONENT/state.json" -Raw | ConvertFrom-Json
+          @(
+            "### Rollback $env:COMPONENT on $env:TARGET_ENV ($env:DEPLOY_MODE mode)"
+            ''
+            '| Field | Value |'
+            '|---|---|'
+            "| Outcome | **$($r.outcome)** |"
+            "| From | $($r.from) |"
+            "| To | $($r.to) |"
+            "| Active now | $($s.active) |"
+            "| Previous now | $($s.previous) |"
+            "| Known good | $($s.knownGood) |"
+          ) | Out-File -Append $env:GITHUB_STEP_SUMMARY
+
+      - name: Save mock server state (mock only)
+        if: always() && env.DEPLOY_MODE == 'Mock'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ runner.temp }}/deploy-root
+          key: mock-server-${{ inputs.environment }}-${{ github.run_id }}-${{ github.run_attempt }}
+
+      - name: Upload rollback log
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: rollback-log-${{ inputs.component }}-${{ inputs.environment }}-${{ github.run_number }}
+          path: ${{ env.DEPLOY_ROOT }}/${{ inputs.component }}/logs/
+          if-no-files-found: warn
+          retention-days: 30

@@ -1,0 +1,130 @@
+name: CI Backend
+
+# Backend-only trigger. global.json is included because changing the SDK pin
+# must rebuild the backend even though the file lives at the repo root.
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - "backend/**"
+      - "global.json"
+      - ".github/workflows/ci-backend.yml"
+  push:
+    branches: [main]
+    paths:
+      - "backend/**"
+      - "global.json"
+      - ".github/workflows/ci-backend.yml"
+  workflow_dispatch: # manual "Run workflow" button for demos
+
+# Least privilege: the job token can only read the repository.
+# Jobs that need more (e.g. creating a release) request it individually.
+permissions:
+  contents: read
+
+# One run per branch. On a PR, a newer push cancels the outdated build;
+# on main, builds are never cancelled because they may publish artifacts.
+concurrency:
+  group: ci-backend-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  COMPONENT: backend # the only line that differs from the frontend workflow
+
+jobs:
+  build-test-package:
+    name: Build, test and package
+    runs-on: ubuntu-24.04 # pinned image: predictable toolchain, bumped deliberately
+    timeout-minutes: 15   # a hung step fails fast instead of burning hours
+    defaults:
+      run:
+        working-directory: backend # applies to `run:` steps only; `uses:` inputs stay repo-relative
+    steps:
+      # Third-party code is pinned to an immutable commit SHA; the tag is a comment
+      # for humans and for Dependabot. A tag can be moved, a SHA cannot.
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      # SDK version comes from global.json (one source of truth). The NuGet cache
+      # is keyed by the lock files, which is one more reason they exist.
+      - name: Set up .NET SDK
+        uses: actions/setup-dotnet@a98b56852c35b8e3190ac28c8c2271da59106c68 # v6.0.0
+        with:
+          global-json-file: global.json
+          cache: true
+          cache-dependency-path: backend/**/packages.lock.json
+
+      # --locked-mode fails if packages.lock.json no longer matches the projects.
+      # High/critical advisories are build errors here (Directory.Build.props).
+      - name: Restore
+        run: dotnet restore --locked-mode
+
+      - name: Build
+        run: dotnet build --no-restore --configuration Release
+
+      # --no-build reuses the binaries from the previous step: test exactly what was built.
+      - name: Test
+        run: dotnet test --no-build --configuration Release
+
+      # publish assembles the deployable folder: DLLs, runtime config and the
+      # IIS web.config. Only the Api project; the test project never ships.
+      - name: Publish
+        run: dotnet publish Api/Api.csproj --no-build --configuration Release --output publish
+
+      # Version = MAJOR.MINOR from the VERSION file + GitHub's per-workflow run counter.
+      # The short SHA goes into the artifact name; the full SHA goes into the manifest.
+      - name: Compute version
+        id: version
+        run: |
+          BASE=$(tr -d '[:space:]' < VERSION)
+          VERSION="${BASE}.${GITHUB_RUN_NUMBER}"
+          SHORT_SHA="${GITHUB_SHA:0:7}"
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+          echo "artifact=${COMPONENT}-${VERSION}-${SHORT_SHA}" >> "$GITHUB_OUTPUT"
+
+      # Expressions are mapped into env vars instead of being interpolated into the
+      # script: `${{ }}` inside `run:` is a script-injection vector, `$VAR` is not.
+      - name: Package
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+          ARTIFACT: ${{ steps.version.outputs.artifact }}
+        run: |
+          # The IIS hosting config and the app itself must be in the package.
+          test -f publish/web.config
+          test -f publish/Api.dll
+
+          # Environment-specific settings never ship in the artifact; they come from the server.
+          rm -f publish/appsettings.Development.json
+
+          # Provenance travels inside the artifact: which commit and run produced it.
+          cat > publish/manifest.json <<EOF
+          {
+            "component": "${COMPONENT}",
+            "version": "${VERSION}",
+            "commit": "${GITHUB_SHA}",
+            "ref": "${GITHUB_REF}",
+            "run_id": "${GITHUB_RUN_ID}",
+            "run_number": "${GITHUB_RUN_NUMBER}",
+            "run_attempt": "${GITHUB_RUN_ATTEMPT}",
+            "built_at": "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          }
+          EOF
+
+          # Absolute output path: unambiguous regardless of the working directory.
+          OUT="$GITHUB_WORKSPACE/out"
+          mkdir -p "$OUT"
+          (cd publish && zip -r "$OUT/${ARTIFACT}.zip" .)
+          (cd "$OUT" && sha256sum "${ARTIFACT}.zip" > "${ARTIFACT}.zip.sha256")
+          ls -la "$OUT"
+
+      # PR builds are kept briefly for inspection; main builds longer. Long-term
+      # retention is handled by GitHub Releases (next session), not by artifacts.
+      # `overwrite` lets a rerun replace its own artifact instead of failing on the name.
+      - name: Upload artifact
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: ${{ steps.version.outputs.artifact }}
+          path: out/
+          if-no-files-found: error
+          overwrite: true
+          retention-days: ${{ github.event_name == 'pull_request' && 7 || 30 }}

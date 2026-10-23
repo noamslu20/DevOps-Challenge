@@ -72,7 +72,7 @@ jobs:
         run: |
           BASE=$(tr -d '[:space:]' < VERSION)
           VERSION="${BASE}.${GITHUB_RUN_NUMBER}"
-          SHORT_SHA="${GITHUB_SHA[REDACTED_IPV6_ADDRESS_1]}"
+          SHORT_SHA="${GITHUB_SHA:0:7}"
           echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
           echo "artifact=${COMPONENT}-${VERSION}-${SHORT_SHA}" >> "$GITHUB_OUTPUT"
 

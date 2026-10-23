@@ -26,6 +26,17 @@ app.MapGet("/weatherforecast", () =>
 .WithName("GetWeatherForecast");
 
 app.MapHealthChecks("/health");
+
+// Reports which release is running by reading the manifest CI placed next to the DLL.
+app.MapGet("/api/version", () =>
+{
+    var manifestPath = Path.Combine(AppContext.BaseDirectory, "manifest.json");
+    return File.Exists(manifestPath)
+        ? Results.Content(File.ReadAllText(manifestPath), "application/json")
+        : Results.Json(new { version = "dev" });
+});
+
+
 app.Run();
 
 record WeatherForecast(DateOnly Date, int TemperatureC, string? Summary)

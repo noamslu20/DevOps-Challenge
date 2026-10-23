@@ -1,0 +1,236 @@
+name: CD Deploy
+
+# Manual by design: a human picks a published release and a target environment.
+# CI never deploys; CD never builds.
+on:
+  workflow_dispatch:
+    inputs:
+      component:
+        description: Component to deploy
+        type: choice
+        options: [frontend, backend]
+        required: true
+      release_tag:
+        description: Release tag to deploy (e.g. backend-v1.0.6)
+        type: string
+        required: true
+      environment:
+        description: Target environment
+        type: choice
+        options: [staging, production]
+        required: true
+      simulate_failure:
+        description: Mock mode only - make the new release fail its health check to demonstrate automatic rollback
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # Gate 1: is this release allowed to be deployed at all?
+  # Environment rules protect which *workflow ref* may deploy; nothing checks the *artifact's*
+  # origin unless we do. Runs on a hosted runner: it needs GitHub, not the server.
+  # ---------------------------------------------------------------------------
+  validate:
+    name: Validate release
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    outputs:
+      version: ${{ steps.check.outputs.version }}
+      commit: ${{ steps.check.outputs.commit }}
+    steps:
+      - name: Checkout (full history, needed to prove the commit is on main)
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+
+      - name: Check tag, release and commit lineage
+        id: check
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          COMPONENT: ${{ inputs.component }}
+          TAG: ${{ inputs.release_tag }}
+        run: |
+          # 1. The tag must belong to the selected component and look like a version.
+          if [[ ! "$TAG" =~ ^${COMPONENT}-v([0-9]+\.[0-9]+\.[0-9]+)$ ]]; then
+            echo "::error::'$TAG' is not a $COMPONENT release tag (expected ${COMPONENT}-vX.Y.Z)"; exit 1
+          fi
+          VERSION="${BASH_REMATCH[1]}"
+
+          # 2. A published (non-draft) release created by the CI bot must exist for it.
+          if ! RELEASE=$(gh release view "$TAG" --json isDraft,author 2>/dev/null); then
+            echo "::error::No GitHub Release found for tag '$TAG'"; exit 1
+          fi
+          if [ "$(jq -r .isDraft <<<"$RELEASE")" != "false" ]; then
+            echo "::error::Release '$TAG' is a draft"; exit 1
+          fi
+          AUTHOR=$(jq -r .author.login <<<"$RELEASE")
+          if [[ "$AUTHOR" != "github-actions" && "$AUTHOR" != "github-actions[bot]" ]]; then
+            echo "::error::Release '$TAG' was created by '$AUTHOR', not by the CI pipeline"; exit 1
+          fi
+
+          # 3. The tagged commit must be on main: the only branch allowed to produce deployables.
+          COMMIT=$(gh api "repos/$GH_REPO/git/ref/tags/$TAG" --jq .object.sha)
+          if ! git merge-base --is-ancestor "$COMMIT" origin/main; then
+            echo "::error::Commit $COMMIT of '$TAG' is not on main"; exit 1
+          fi
+
+          echo "Release $TAG validated: version $VERSION, commit $COMMIT, author $AUTHOR"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "commit=$COMMIT" >> "$GITHUB_OUTPUT"
+
+  # ---------------------------------------------------------------------------
+  # Gate 2 + the deployment. `environment:` applies that environment's protection rules
+  # (production: required reviewer) and scopes its variables. In the real setup the
+  # DEPLOY_RUNNER_LABEL variable selects the self-hosted runner inside the network;
+  # when it is unset (this assessment) the job runs on a hosted runner in Mock mode.
+  # ---------------------------------------------------------------------------
+  deploy:
+    name: Deploy to ${{ inputs.environment }}
+    needs: validate
+    runs-on: ${{ vars.DEPLOY_RUNNER_LABEL || 'ubuntu-24.04' }}
+    environment: ${{ inputs.environment }}
+    # One deploy per component per environment at a time, and never cancel one midway.
+    concurrency:
+      group: deploy-${{ inputs.component }}-${{ inputs.environment }}
+      cancel-in-progress: false
+    timeout-minutes: 20
+    permissions:
+      contents: read   # enough to download release assets; the job never writes to the repo
+    env:
+      DEPLOY_MODE: ${{ vars.DEPLOY_MODE || 'Mock' }}
+      COMPONENT: ${{ inputs.component }}
+      TAG: ${{ inputs.release_tag }}
+      VERSION: ${{ needs.validate.outputs.version }}
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+    steps:
+      # The server only needs the deployment scripts, never the application source.
+      - name: Checkout deploy scripts only
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          sparse-checkout: deploy
+
+      # Mock: a scratch folder on the runner. Iis: the environment's DEPLOY_ROOT (e.g. D:\apps\prod).
+      - name: Resolve deploy root
+        env:
+          DEPLOY_ROOT_VAR: ${{ vars.DEPLOY_ROOT }}
+        run: |
+          if [ "$DEPLOY_MODE" = "Mock" ]; then ROOT="$RUNNER_TEMP/deploy-root"; else ROOT="$DEPLOY_ROOT_VAR"; fi
+          echo "DEPLOY_ROOT=$ROOT" >> "$GITHUB_ENV"
+          echo "Deploy root: $ROOT ($DEPLOY_MODE mode)"
+
+      # Hosted runners are ephemeral. The cache stands in for a server that keeps its disk between
+      # deployments, so consecutive runs see previous/active/known-good evolve. Skipped on a real runner.
+      - name: Restore mock server state (mock only)
+        if: env.DEPLOY_MODE == 'Mock'
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ runner.temp }}/deploy-root
+          key: mock-server-${{ inputs.environment }}-${{ github.run_id }}-${{ github.run_attempt }}
+          restore-keys: mock-server-${{ inputs.environment }}-
+
+      # On a real server operations has already provisioned the runtime secrets. In mock mode nobody
+      # has, so this step plays operations (names only matter; the value is fake) so preflight can pass.
+      - name: Simulate operations provisioning runtime secrets (mock only)
+        if: env.DEPLOY_MODE == 'Mock' && inputs.component == 'backend'
+        shell: pwsh
+        env:
+          APP_POOL: ${{ vars.API_APP_POOL }}
+          REQUIRED: ${{ vars.API_REQUIRED_VARIABLES }}
+        run: |
+          Import-Module ./deploy/IisAdapter.psm1
+          Initialize-IisAdapter -Mode Mock -MockRoot "$env:DEPLOY_ROOT/_iis-mock"
+          foreach ($name in ($env:REQUIRED -split ',')) {
+            if ($name.Trim()) { Set-AppPoolEnvironmentVariable -AppPoolName $env:APP_POOL -Name $name.Trim() -Value 'provisioned-by-operations' }
+          }
+
+      # The artifact produced and tested by CI, fetched by tag. Nothing is rebuilt here.
+      - name: Download release assets
+        run: |
+          gh release download "$TAG" --pattern '*.zip' --pattern '*.zip.sha256' --dir "$RUNNER_TEMP/incoming" --clobber
+          ls -la "$RUNNER_TEMP/incoming"
+
+      # Environment-scoped variables resolve to the values of the environment this job declares.
+      # simulate_failure maps to the script's failure-injection variable, so the demo uses the real code path.
+      - name: Deploy release
+        shell: pwsh
+        env:
+          SITE_NAME: ${{ inputs.component == 'frontend' && vars.FRONTEND_SITE_NAME || vars.API_SITE_NAME }}
+          APP_POOL: ${{ inputs.component == 'frontend' && vars.FRONTEND_APP_POOL || vars.API_APP_POOL }}
+          HEALTH_URL: ${{ inputs.component == 'frontend' && vars.FRONTEND_HEALTH_URL || vars.API_HEALTH_URL }}
+          ASPNETCORE_ENV: ${{ vars.ASPNETCORE_ENVIRONMENT }}
+          REQUIRED: ${{ vars.API_REQUIRED_VARIABLES }}
+          FRONTEND_API_BASE_URL: ${{ vars.FRONTEND_API_BASE_URL }}
+          RELEASES_TO_KEEP: ${{ vars.RELEASES_TO_KEEP || '5' }}
+          MOCK_UNHEALTHY_VERSION: ${{ inputs.simulate_failure && needs.validate.outputs.version || '' }}
+        run: |
+          $package = Get-ChildItem "$env:RUNNER_TEMP/incoming/*.zip" | Select-Object -First 1
+          $params = @{
+            Component      = $env:COMPONENT
+            PackagePath    = $package.FullName
+            ChecksumPath   = "$($package.FullName).sha256"
+            DeployRoot     = $env:DEPLOY_ROOT
+            SiteName       = $env:SITE_NAME
+            AppPoolName    = $env:APP_POOL
+            Mode           = $env:DEPLOY_MODE
+            ReleasesToKeep = [int] $env:RELEASES_TO_KEEP
+          }
+          if ($env:DEPLOY_MODE -eq 'Iis') { $params.HealthUrl = $env:HEALTH_URL }
+          if ($env:COMPONENT -eq 'backend') {
+            $params.AspNetCoreEnvironment    = $env:ASPNETCORE_ENV
+            $params.RequiredAppPoolVariables = @($env:REQUIRED -split ',' | ForEach-Object { $_.Trim() } | Where-Object { $_ })
+          }
+          else {
+            $params.FrontendApiBaseUrl = $env:FRONTEND_API_BASE_URL
+          }
+          & ./deploy/Deploy-Release.ps1 @params
+          # Non-zero exit (health failed / rolled back / aborted) fails this step and therefore the job.
+
+      # Always runs, so a failed deploy explains itself on the run page without opening logs.
+      - name: Write job summary
+        if: always()
+        shell: pwsh
+        env:
+          TARGET_ENV: ${{ inputs.environment }}
+          COMMIT: ${{ needs.validate.outputs.commit }}
+        run: |
+          $resultFile = "$env:DEPLOY_ROOT/$env:COMPONENT/last-deploy.json"
+          if (-not (Test-Path $resultFile)) {
+            "### Deploy of $env:TAG to $env:TARGET_ENV did not reach the deploy script" | Out-File -Append $env:GITHUB_STEP_SUMMARY
+            exit 0
+          }
+          $r = Get-Content $resultFile -Raw | ConvertFrom-Json
+          $s = Get-Content "$env:DEPLOY_ROOT/$env:COMPONENT/state.json" -Raw | ConvertFrom-Json
+          @(
+            "### Deploy $env:COMPONENT $env:TAG to $env:TARGET_ENV ($env:DEPLOY_MODE mode)"
+            ''
+            '| Field | Value |'
+            '|---|---|'
+            "| Outcome | **$($r.outcome)** |"
+            "| Deployed version | $($r.version) |"
+            "| Previously active | $($r.previousActive) |"
+            "| Rolled back automatically | $($r.rolledBack) |"
+            "| Active now | $($s.active) |"
+            "| Known good | $($s.knownGood) |"
+            "| Source commit | $env:COMMIT |"
+          ) | Out-File -Append $env:GITHUB_STEP_SUMMARY
+
+      - name: Save mock server state (mock only)
+        if: always() && env.DEPLOY_MODE == 'Mock'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ runner.temp }}/deploy-root
+          key: mock-server-${{ inputs.environment }}-${{ github.run_id }}-${{ github.run_attempt }}
+
+      - name: Upload deployment log
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: deploy-log-${{ inputs.component }}-${{ inputs.environment }}-${{ github.run_number }}
+          path: ${{ env.DEPLOY_ROOT }}/${{ inputs.component }}/logs/
+          if-no-files-found: warn
+          retention-days: 30

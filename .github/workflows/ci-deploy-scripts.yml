@@ -1,0 +1,59 @@
+name: CI Deploy Scripts
+
+# The deployment engine is code too: every change to it runs the full lifecycle simulation.
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - "deploy/**"
+      - ".github/workflows/ci-deploy-scripts.yml"
+  push:
+    branches: [main]
+    paths:
+      - "deploy/**"
+      - ".github/workflows/ci-deploy-scripts.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-deploy-scripts-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  simulate:
+    name: Simulate deploy, failure, rollback
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      # pwsh is preinstalled on GitHub-hosted runners. Mock mode is cross-platform, so the same
+      # scripts that would run on the Windows host run here unchanged.
+      # RUNNER_TEMP is outside the checkout, so nothing generated can leak into the repo.
+      - name: Run lifecycle simulation
+        shell: pwsh
+        run: ./deploy/Invoke-DeploySimulation.ps1 -WorkRoot "$env:RUNNER_TEMP/deploy-simulation" -KeepWorkRoot
+
+      # Evidence for reviewers: the state file and per-run transcripts, even when the simulation fails.
+      - name: Publish final state to the job summary
+        if: always()
+        shell: pwsh
+        run: |
+          '### Release state after the simulation' | Out-File -Append $env:GITHUB_STEP_SUMMARY
+          '```json' | Out-File -Append $env:GITHUB_STEP_SUMMARY
+          Get-Content "$env:RUNNER_TEMP/deploy-simulation/apps/backend/state.json" | Out-File -Append $env:GITHUB_STEP_SUMMARY
+          '```' | Out-File -Append $env:GITHUB_STEP_SUMMARY
+
+      - name: Upload simulation evidence
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: deploy-simulation-${{ github.run_number }}
+          path: |
+            ${{ runner.temp }}/deploy-simulation/apps/backend/state.json
+            ${{ runner.temp }}/deploy-simulation/apps/backend/logs/
+          if-no-files-found: error
+          retention-days: 7

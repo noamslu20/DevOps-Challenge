@@ -1,5 +1,3 @@
-# Keeps the pinned action SHAs and the two dependency trees current with automated PRs.
-# Each PR runs the normal CI, so an update is tested before anyone merges it.
 version: 2
 updates:
   - package-ecosystem: github-actions
@@ -12,8 +10,21 @@ updates:
       interval: weekly
     groups:
       angular:
-        patterns: ["@angular/*"]   # Angular packages must move together
+        patterns: ["@angular/*"]
+    ignore:
+      # Stay on the Angular major the project targets; minors and patches still arrive as PRs.
+      - dependency-name: "@angular/*"
+        update-types: ["version-update:semver-major"]
+      # TypeScript majors are dictated by Angular's supported range.
+      - dependency-name: "typescript"
+        update-types: ["version-update:semver-major"]
   - package-ecosystem: nuget
     directory: /backend
     schedule:
       interval: weekly
+    ignore:
+      # Framework-tracking packages follow the .NET major pinned in global.json and the csproj files.
+      - dependency-name: "Microsoft.AspNetCore.*"
+        update-types: ["version-update:semver-major"]
+      - dependency-name: "Microsoft.Extensions.*"
+        update-types: ["version-update:semver-major"]

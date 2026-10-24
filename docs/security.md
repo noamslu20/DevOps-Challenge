@@ -6,11 +6,9 @@ no real credentials exist anywhere in this repository or its settings.
 
 ## Controls implemented
 
-|     Control   |    Where  |    What it does   |
+| Control | Where | What it does |
 |---|---|---|
-| Least-privilege workflow token | every workflow:
-`permissions: contents: read`;
-`publish-release` job only: `contents: write` | The automatic `GITHUB_TOKEN` can only read the repo; the single job that creates tags and releases gets write access to contents and nothing else. No personal access tokens anywhere. |
+| Least-privilege workflow token | every workflow: `permissions: contents: read`; `publish-release` job only: `contents: write` | The automatic `GITHUB_TOKEN` can only read the repo; the single job that creates tags and releases gets write access to contents and nothing else. No personal access tokens anywhere. |
 | Actions pinned to commit SHAs | every `uses:` line | A tag like `v7` can be moved to different code; a 40-character SHA cannot. The version is kept as a comment for humans and for Dependabot. |
 | Dependabot | `.github/dependabot.yml` | Weekly PRs for action SHAs, npm and NuGet packages, each tested by the normal CI before merge. |
 | Lockfiles and locked restores | `frontend/package-lock.json` + `npm ci`; `backend/**/packages.lock.json` + `dotnet restore --locked-mode` | Builds are reproducible and a dependency cannot change without a committed diff. |

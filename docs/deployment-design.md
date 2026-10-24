@@ -21,7 +21,7 @@ flowchart LR
         subgraph IIS server
             FE[IIS site: frontend<br/>static files + URL Rewrite]
             API[IIS site: api<br/>app pool, ASP.NET Core Module, in-process]
-            FS[(D:\apps\<component><br/>releases\<version><br/>state.json, logs\)]
+            FS[("D:\apps\component<br/>releases\version<br/>state.json, logs")]
         end
     end
 
@@ -57,18 +57,18 @@ sequenceDiagram
     GH->>GH: environment gate (production: wait for approval)
     GH->>Run: start deploy job
     Run->>GH: gh release download (zip + sha256)
-    Run->>Run: verify checksum, extract into releases\<version>
+    Run->>Run: verify checksum, extract into releases\version
     Run->>Run: write config.json (frontend) / set ASPNETCORE_ENVIRONMENT, preflight secret names (backend)
     Run->>Run: state.json: inProgress = version
     Run->>IIS: stop app pool
-    Run->>IIS: set site physicalPath = releases\<version>
+    Run->>IIS: set site physicalPath = releases\version
     Run->>IIS: start app pool
     Run->>App: GET /health (retries)
     alt healthy
-        Run->>Run: state: active = version, previous = old, knownGood = version; prune old releases
+        Run->>Run: state: active = version, previous = old, knownGood = version, then prune old releases
         Run-->>GH: exit 0, summary
     else unhealthy
-        Run->>IIS: stop pool, physicalPath = releases\<previous>, start pool
+        Run->>IIS: stop pool, physicalPath = releases\previous, start pool
         Run->>App: GET /health (retries)
         Run->>Run: state: history += failed deploy + auto-rollback result
         Run-->>GH: exit 1, summary (job fails, environment healthy)

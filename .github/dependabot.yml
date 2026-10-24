@@ -1,0 +1,19 @@
+# Keeps the pinned action SHAs and the two dependency trees current with automated PRs.
+# Each PR runs the normal CI, so an update is tested before anyone merges it.
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+  - package-ecosystem: npm
+    directory: /frontend
+    schedule:
+      interval: weekly
+    groups:
+      angular:
+        patterns: ["@angular/*"]   # Angular packages must move together
+  - package-ecosystem: nuget
+    directory: /backend
+    schedule:
+      interval: weekly

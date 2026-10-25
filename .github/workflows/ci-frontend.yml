@@ -65,7 +65,7 @@ jobs:
       # blocking for high/critical because its packages do ship (see Directory.Build.props).
       - name: Audit production dependencies
         run: npm audit --omit=dev --audit-level=high
-        continue-on-error: true
+        
 
       # Vitest runs once (no watch mode) in jsdom; a non-zero exit code fails the job,
       # which is the whole "fail the workflow on test failure" mechanism.

@@ -6,8 +6,6 @@ CD deploys a selected release to a Windows/IIS server through a self-hosted runn
 and rolls back automatically on failure. No real server exists for this assessment, so the deployment
 engine runs in a mock mode that exercises the same code paths against a simulated IIS.
 
-- Design and diagrams: [docs/deployment-design.md](docs/deployment-design.md)
-- Security controls, risks and mitigations: [docs/security.md](docs/security.md)
 - **Architecture walkthrough: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)**
 - Design and diagrams: [docs/deployment-design.md](docs/deployment-design.md)
 - Security controls, risks and mitigations: [docs/security.md](docs/security.md)

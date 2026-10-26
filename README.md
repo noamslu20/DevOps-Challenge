@@ -8,6 +8,9 @@ engine runs in a mock mode that exercises the same code paths against a simulate
 
 - Design and diagrams: [docs/deployment-design.md](docs/deployment-design.md)
 - Security controls, risks and mitigations: [docs/security.md](docs/security.md)
+- **Architecture walkthrough: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)**
+- Design and diagrams: [docs/deployment-design.md](docs/deployment-design.md)
+- Security controls, risks and mitigations: [docs/security.md](docs/security.md)
 
 ## Assumptions
 
